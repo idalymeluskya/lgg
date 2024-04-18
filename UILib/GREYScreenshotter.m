@@ -32,6 +32,9 @@ static Class gUIAlertControllerShimPresenterWindowClass;
 // Private class for ModalHostingWindow window that doesn't work with drawViewHierarchyInRect.
 static Class gUIModalItemHostingWindowClass;
 
+// Action to render an image with the given renderer.
+typedef UIImage * (^GREYImageRendererAction)(UIGraphicsImageRenderer *renderer);
+
 /**
  * @return A current screen if the window exists and @c nil if it does not.
  */
@@ -93,18 +96,19 @@ static UIScreen *MainScreen(void) {
   if (!mainScreen) return nil;
   UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
   format.scale = mainScreen.scale;
-  UIGraphicsImageRenderer *renderer =
-      [[UIGraphicsImageRenderer alloc] initWithSize:elementAXFrame.size format:format];
-  UIImage *orientedScreenshot =
-      [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-        // We want to capture the most up-to-date version of the screen here, including the updates
-        // that have been made in the current runloop iteration. Therefore we use
-        // `afterScreenUpdates:YES`.
-        [self drawViewInContext:context
-                           view:viewToSnapshot
-                         bounds:elementAXFrame
-             afterScreenUpdates:YES];
-      }];
+  GREYImageRendererAction action = ^(UIGraphicsImageRenderer *renderer) {
+    // We want to capture the most up-to-date version of the screen here, including the updates that
+    // have been made in the current runloop iteration. Therefore we use `afterScreenUpdates:YES`.
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+      [self drawViewInContext:context
+                         view:viewToSnapshot
+                       bounds:renderer.format.bounds
+           afterScreenUpdates:YES];
+    }];
+  };
+  UIImage *orientedScreenshot = [self imageInScreenRect:elementAXFrame
+                                             withFormat:format
+                                            usingAction:action];
 
   return orientedScreenshot;
 }
@@ -133,6 +137,29 @@ static UIScreen *MainScreen(void) {
                                       inScreenRect:(CGRect)screenRect
                                      withStatusBar:(BOOL)includeStatusBar
                                       forDebugging:(BOOL)forDebugging {
+  UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
+  format.opaque = !iOS17_OR_ABOVE();
+  GREYImageRendererAction action = ^(UIGraphicsImageRenderer *renderer) {
+    return [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
+      [self drawScreenInContext:context
+             afterScreenUpdates:afterScreenUpdates
+                   inScreenRect:renderer.format.bounds
+                  withStatusBar:includeStatusBar];
+    }];
+  };
+  UIImage *orientedScreenshot = [self imageInScreenRect:screenRect
+                                             withFormat:format
+                                            usingAction:action];
+
+
+  return orientedScreenshot;
+}
+
+#pragma mark - Private
+
++ (UIImage *)imageInScreenRect:(CGRect)screenRect
+                    withFormat:(UIGraphicsImageRendererFormat *)format
+                   usingAction:(GREYImageRendererAction)action {
   CGRect snapshotRect = screenRect;
   // When possible, only draws the portion where the target rect is located instead of drawing the
   // entire screen and cropping it to the size of the target rect. This optimization works when
@@ -147,17 +174,8 @@ static UIScreen *MainScreen(void) {
   }
 #endif
 
-  UIGraphicsImageRendererFormat *format = [UIGraphicsImageRendererFormat preferredFormat];
-  format.opaque = !iOS17_OR_ABOVE();
-  UIGraphicsImageRenderer *renderer =
-      [[UIGraphicsImageRenderer alloc] initWithSize:snapshotRect.size format:format];
   UIImage *orientedScreenshot =
-      [renderer imageWithActions:^(UIGraphicsImageRendererContext *context) {
-        [self drawScreenInContext:context
-               afterScreenUpdates:afterScreenUpdates
-                     inScreenRect:snapshotRect
-                    withStatusBar:includeStatusBar];
-      }];
+      action([[UIGraphicsImageRenderer alloc] initWithSize:snapshotRect.size format:format]);
 
   if (!CGRectEqualToRect(snapshotRect, screenRect)) {
     CGImageRef croppedImage = CGImageCreateWithImageInRect(orientedScreenshot.CGImage,
@@ -168,11 +186,8 @@ static UIScreen *MainScreen(void) {
     CGImageRelease(croppedImage);
   }
 
-
   return orientedScreenshot;
 }
-
-#pragma mark - Private
 
 + (void)drawScreenInContext:(UIGraphicsImageRendererContext *)context
          afterScreenUpdates:(BOOL)afterUpdates
